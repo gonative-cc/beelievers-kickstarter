@@ -77,7 +77,7 @@ graph TD
 | Parameter                   | Default  | Description                                                         |
 | --------------------------- | -------- | ------------------------------------------------------------------- |
 | `max_immediate_unlock`      | 8%       | Maximum % of funds team receives immediately after successful raise |
-| `min_vesting_duration`      | 4 months | Minimum vesting duration for a Pod                                  |
+| `min_vesting_duration`      | 3 months | Minimum vesting duration for a Pod                                  |
 | `min_subscription_duration` | 7 days   | Minimum subscription period duration                                |
 | `pod_exit_fee`              | 8%       | Standard exit fee after grace period                                |
 | `pod_exit_small_fee`        | 0.8%     | Reduced exit fee during grace period                                |

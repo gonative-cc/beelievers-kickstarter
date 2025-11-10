@@ -125,12 +125,13 @@ public struct EventFailedPodWithdraw has copy, drop { pod_id: ID }
 
 // --- Module Initialization ---
 fun init(ctx: &mut TxContext) {
+    let day = 1000 * 60 * 60 * 24;
     let settings = GlobalSettings {
         id: object::new(ctx),
-        max_immediate_unlock_pm: 50, // 5.0%
-        min_vesting_duration: 1000 * 60 * 60 * 24 * 30 * 18, // 18 months
-        min_subscription_duration: 1000 * 60 * 60 * 24 * 14, // 14 days
-        pod_exit_fee_pm: 50, // 5.0%
+        max_immediate_unlock_pm: 80, // 8.0%
+        min_vesting_duration: day * 30 * 3, // 3 months
+        min_subscription_duration: day * 7,
+        pod_exit_fee_pm: 80, // 8.0%
         pod_exit_small_fee_pm: 8, // 0.8%
         small_fee_duration: 1000 * 60 * 60 * 24 * 14, // 14 days
         cancel_subscription_keep: 1, // 0.1%
