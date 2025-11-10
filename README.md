@@ -82,7 +82,7 @@ graph TD
 | `pod_exit_fee`              | 8%       | Standard exit fee after grace period                                |
 | `pod_exit_small_fee`        | 0.8%     | Reduced exit fee during grace period                                |
 | `small_fee_duration`        | 14 days  | Grace period with reduced exit fees                                 |
-| `cancel_subscription_fee`   | 0.1%     | Fee for cancelling the investment during the subscription phase     |
+| `cancel_subscription_keep`  | 0.1%     | Amount kept when investor cancels subscription                      |
 
 ### Phase 1: Pod Creation
 
@@ -112,7 +112,8 @@ Once a pod is created, anyone can subscribe for investment during the subscripti
 1. If the maximum investment goal is reached before the subscription end date:
    - The subscription phase ends early.
 
-During the subscription phase investors can cancel their subscription by calling `cancel_subscription`. `investment × cancel_subscription_fee` is charged. The fee will be fully refundable if the pod didn't reach the `min_investment_goal`, otherwise founders can claim it.
+During the subscription phase investors can cancel their subscription by calling `cancel_subscription`. `investment × cancel_subscription_keep` will be kept as an investment. This will be fully refundable if the Pod didn't reach the `min_investment_goal`. Otherwise, this will be kept as a reduced investment.
+NOTE: investor can cancel the subscription only once. If an investor cancels his subscription, and then increases his investments, then he can't cancel it again.
 
 ### Phase 3: Vesting and Token Distribution
 
@@ -176,8 +177,4 @@ Risk Mitigation
 
 ## Future versions
 
-- Additional exit mechanisms
-- Decentralized Due Diligence & "Veto Council". A DAO comprising experts and seasoned community members, serves as a Veto Council.
-  - Vote for non-confidence
-- Milestones
-- founder_vesting scheme
+New versions are planned with additional features.

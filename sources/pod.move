@@ -1,7 +1,7 @@
 module beelievers_kickstarter::pod;
 
 use std::ascii;
-use std::string::{Self, String};
+use std::string::String;
 use sui::balance::{Self, Balance};
 use sui::clock::{Self, Clock};
 use sui::coin::{Self, Coin};
@@ -10,7 +10,8 @@ use sui::table::{Self, Table};
 use sui::url::{Self, Url};
 
 // --- Constants ---
-const PRECISION: u64 = 1000; // For permille calculations
+const PERMILLE: u64 = 1000; // For permille calculations
+const PERMILLE_U128: u128 = 1000; // For permille calculations
 
 // Pod Statuses
 const STATUS_INACTIVE: u8 = 0;
@@ -25,6 +26,7 @@ const E_POD_NOT_VESTING: u64 = 2;
 const E_POD_NOT_FAILED: u64 = 3;
 const E_NOT_ADMIN: u64 = 5;
 const E_INVESTMENT_NOT_FOUND: u64 = 6;
+const E_INVESTMENT_CANCELLED: u64 = 7;
 const E_ALREADY_EXITED: u64 = 8;
 const E_MAX_GOAL_REACHED: u64 = 9;
 const E_INVALID_TOKEN_SUPPLY: u64 = 11;
@@ -41,10 +43,10 @@ public struct GlobalSettings has key {
     max_immediate_unlock_pm: u64,
     min_vesting_duration: u64,
     min_subscription_duration: u64,
-    pod_exit_fee: u64,
-    pod_exit_small_fee: u64,
+    pod_exit_fee_pm: u64,
+    pod_exit_small_fee_pm: u64,
     small_fee_duration: u64,
-    subscription_cancel_fee: u64,
+    cancel_subscription_keep: u64,
 }
 
 /// Capability for the project team to manage their pod.
@@ -58,6 +60,7 @@ public struct InvestorAllocation has copy, drop, store {
     invested: u64,
     allocation: u64,
     claimed_tokens: u64,
+    cancelled: bool,
 }
 
 /// The main struct representing a funding campaign.
@@ -69,7 +72,7 @@ public struct Pod<phantom C, phantom T> has key {
     token_vault: Balance<T>,
     funds_vault: Balance<C>,
     total_raised: u64,
-    total_allocated: u64, // TODO: keep track to allow funders to claim back unallocated tokens, and add function to claim the unallocated tokens after subscription end
+    total_allocated: u64,
     investments: Table<address, InvestorAllocation>,
     founder_claimed_funds: u64,
     vesting_start: u64,
@@ -83,8 +86,8 @@ public struct Pod<phantom C, phantom T> has key {
     vesting_duration: u64,
     immediate_unlock_pm: u64,
     // Copied Fee Settings
-    pod_exit_fee: u64,
-    pod_exit_small_fee: u64,
+    pod_exit_fee_pm: u64,
+    pod_exit_small_fee_pm: u64,
     small_fee_duration: u64,
 }
 
@@ -105,6 +108,7 @@ public struct EventSubscriptionCancelled has copy, drop {
     allocation: u64,
 }
 public struct EventSettingsUpdated has copy, drop {}
+public struct EventUnallocatedTokensClaimed has copy, drop { pod_id: ID, amount: u64 }
 
 // --- Module Initialization ---
 fun init(ctx: &mut TxContext) {
@@ -113,10 +117,10 @@ fun init(ctx: &mut TxContext) {
         max_immediate_unlock_pm: 50, // 5.0%
         min_vesting_duration: 1000 * 60 * 60 * 24 * 30 * 18, // 18 months
         min_subscription_duration: 1000 * 60 * 60 * 24 * 14, // 14 days
-        pod_exit_fee: 50, // 5.0%
-        pod_exit_small_fee: 8, // 0.8%
+        pod_exit_fee_pm: 50, // 5.0%
+        pod_exit_small_fee_pm: 8, // 0.8%
         small_fee_duration: 1000 * 60 * 60 * 24 * 14, // 14 days
-        subscription_cancel_fee: 1, // 0.1%
+        cancel_subscription_keep: 1, // 0.1%
     };
     transfer::share_object(settings);
 
@@ -131,10 +135,10 @@ public entry fun update_settings(
     max_immediate_unlock_pm: Option<u64>,
     min_vesting_duration: Option<u64>,
     min_subscription_duration: Option<u64>,
-    pod_exit_fee: Option<u64>,
-    pod_exit_small_fee: Option<u64>,
+    pod_exit_fee_pm: Option<u64>,
+    pod_exit_small_fee_pm: Option<u64>,
     small_fee_duration: Option<u64>,
-    subscription_cancel_fee: Option<u64>,
+    cancel_subscription_keep: Option<u64>,
     _ctx: &mut TxContext,
 ) {
     if (option::is_some(&max_immediate_unlock_pm)) {
@@ -146,17 +150,17 @@ public entry fun update_settings(
     if (option::is_some(&min_subscription_duration)) {
         settings.min_subscription_duration = option::destroy_some(min_subscription_duration);
     };
-    if (option::is_some(&pod_exit_fee)) {
-        settings.pod_exit_fee = option::destroy_some(pod_exit_fee);
+    if (option::is_some(&pod_exit_fee_pm)) {
+        settings.pod_exit_fee_pm = option::destroy_some(pod_exit_fee_pm);
     };
-    if (option::is_some(&pod_exit_small_fee)) {
-        settings.pod_exit_small_fee = option::destroy_some(pod_exit_small_fee);
+    if (option::is_some(&pod_exit_small_fee_pm)) {
+        settings.pod_exit_small_fee_pm = option::destroy_some(pod_exit_small_fee_pm);
     };
     if (option::is_some(&small_fee_duration)) {
         settings.small_fee_duration = option::destroy_some(small_fee_duration);
     };
-    if (option::is_some(&subscription_cancel_fee)) {
-        settings.subscription_cancel_fee = option::destroy_some(subscription_cancel_fee);
+    if (option::is_some(&cancel_subscription_keep)) {
+        settings.cancel_subscription_keep = option::destroy_some(cancel_subscription_keep);
     };
     event::emit(EventSettingsUpdated {});
 }
@@ -171,7 +175,7 @@ public entry fun create_pod<C, T>(
     price_multiplier: u64,
     min_goal: u64,
     max_goal: u64,
-    // TODO: add subscription_start
+    subscription_start: u64,
     subscription_duration: u64,
     vesting_duration: u64,
     immediate_unlock_pm: u64,
@@ -184,11 +188,12 @@ public entry fun create_pod<C, T>(
             max_goal >= min_goal &&
             subscription_duration >= settings.min_subscription_duration &&
             vesting_duration >= settings.min_vesting_duration &&
-            immediate_unlock_pm <= settings.max_immediate_unlock_pm,
+            immediate_unlock_pm <= settings.max_immediate_unlock_pm &&
+            subscription_start > clock.timestamp_ms(),
     );
     assert!(params_valid, E_INVALID_PARAMS);
 
-    let subscription_end = clock.timestamp_ms() + subscription_duration;
+    let subscription_end = subscription_start + subscription_duration;
     let required_tokens = (max_goal * price_multiplier) / token_price;
     let supplied_amount = tokens.value();
     assert!(supplied_amount == required_tokens, E_INVALID_TOKEN_SUPPLY);
@@ -205,12 +210,12 @@ public entry fun create_pod<C, T>(
         price_multiplier,
         min_goal,
         max_goal,
-        subscription_start: 0, // TODO: use subscription_start argument
+        subscription_start,
         subscription_end,
         vesting_duration,
         immediate_unlock_pm,
-        pod_exit_fee: settings.pod_exit_fee,
-        pod_exit_small_fee: settings.pod_exit_small_fee,
+        pod_exit_fee_pm: settings.pod_exit_fee_pm,
+        pod_exit_small_fee_pm: settings.pod_exit_small_fee_pm,
         small_fee_duration: settings.small_fee_duration,
         total_raised: 0,
         total_allocated: 0,
@@ -230,10 +235,10 @@ public entry fun create_pod<C, T>(
 // --- Public View Functions ---
 public fun pod_status<C, T>(pod: &Pod<C, T>, clock: &Clock): u8 {
     let now = clock.timestamp_ms();
-    if (now >= pod.subscription_end) {
-        if (pod.total_raised < pod.min_goal) STATUS_FAILED else STATUS_VESTING
-    } else if (now < pod.subscription_start) {
+    if (now < pod.subscription_start) {
         STATUS_INACTIVE
+    } else if (now >= pod.subscription_end) {
+        if (pod.total_raised < pod.min_goal) STATUS_FAILED else STATUS_VESTING
     } else {
         STATUS_SUBSCRIPTION
     }
@@ -261,8 +266,9 @@ public fun invest<C, T>(
         (investment_amount, coin::zero(ctx))
     };
 
-    let additional_tokens = (actual_investment * pod.price_multiplier) / pod.token_price;
+    let additional_tokens = ratio_ext(pod.price_multiplier, actual_investment, pod.token_price);
     pod.total_raised = pod.total_raised + actual_investment;
+    pod.total_allocated = pod.total_allocated + additional_tokens;
     balance::join(&mut pod.funds_vault, investment.into_balance());
 
     let total_investment = if (table::contains(&pod.investments, investor)) {
@@ -275,6 +281,7 @@ public fun invest<C, T>(
             invested: actual_investment,
             allocation: additional_tokens,
             claimed_tokens: 0,
+            cancelled: false,
         };
         table::add(&mut pod.investments, investor, allocation);
         actual_investment
@@ -291,8 +298,8 @@ public fun invest<C, T>(
     excess_coin
 }
 
-// NOTE: probably we should protect from looping cancellation.
 /// Cancels an investor's subscription. Reduces the investment to the fee amount.
+/// Protected against looping by enforcing a cooldown period between cancellations.
 public fun cancel_subscription<C, T>(
     pod: &mut Pod<C, T>,
     settings: &GlobalSettings,
@@ -305,15 +312,20 @@ public fun cancel_subscription<C, T>(
     assert!(table::contains(&pod.investments, investor), E_INVESTMENT_NOT_FOUND);
     let pod_id = object::id(pod);
     let i = table::borrow_mut(&mut pod.investments, investor);
+    assert!(!i.cancelled, E_INVESTMENT_CANCELLED);
     let orig_investment = i.invested;
+    let orig_allocation = i.allocation;
 
     // Reduce allocation.
     // TODO: use u128
-    i.invested = (orig_investment * settings.subscription_cancel_fee) / PRECISION;
+    i.invested = (orig_investment * settings.cancel_subscription_keep) / PERMILLE;
     i.allocation = (i.allocation * i.invested) / orig_investment;
+    i.cancelled = true;
 
     let refunded = orig_investment - i.invested;
     pod.total_raised = pod.total_raised - refunded;
+    let allocation_reduction = orig_allocation - i.allocation;
+    pod.total_allocated = pod.total_allocated - allocation_reduction;
 
     event::emit(EventSubscriptionCancelled {
         pod_id,
@@ -364,17 +376,19 @@ public fun exit_investment<C, T>(
         pod.immediate_unlock_pm,
         allocation.allocation,
     );
-    let vested_portion = (total_vested * PRECISION) / allocation.allocation;
-    let unvested_portion = PRECISION - vested_portion;
+    // TODO: use higher precision!
+    // TODO: verify
+    let vested_portion = (total_vested * PERMILLE) / allocation.allocation;
+    let unvested_portion = PERMILLE - vested_portion;
 
-    let fee_percentage = if (clock.timestamp_ms() < pod.vesting_start + pod.small_fee_duration) {
-        pod.pod_exit_small_fee
+    let fee_pm = if (clock.timestamp_ms() < pod.vesting_start + pod.small_fee_duration) {
+        pod.pod_exit_small_fee_pm
     } else {
-        pod.pod_exit_fee
+        pod.pod_exit_fee_pm
     };
 
-    let unvested_investment = (allocation.invested * unvested_portion) / PRECISION;
-    let fee_amount = (unvested_investment * fee_percentage) / PRECISION;
+    let unvested_investment = ratio_ext_pm(allocation.invested, unvested_portion);
+    let fee_amount = ratio_ext_pm(unvested_investment, fee_pm);
     let refund_amount = unvested_investment - fee_amount;
 
     let refund_coin = if (refund_amount > 0) {
@@ -410,7 +424,10 @@ public fun failed_pod_refund<C, T>(
     coin::from_balance(balance::split(&mut pod.funds_vault, allocation.invested), ctx)
 }
 
+//
 // --- Founder Functions ---
+//
+
 public fun founder_claim_funds<C, T>(
     pod: &mut Pod<C, T>,
     cap: &PodAdminCap,
@@ -440,21 +457,39 @@ public fun failed_pod_withdraw<C, T>(
     coin::from_balance(balance::withdraw_all(&mut pod.token_vault), ctx)
 }
 
+/// Enable founders to withdraw unallocated tokens
+public fun withdraw_unallocated_tokens<C, T>(
+    pod: &mut Pod<C, T>,
+    cap: &PodAdminCap,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<T> {
+    assert!(cap.pod_id == object::id(pod), E_NOT_ADMIN);
+    assert!(pod_status(pod, clock) == STATUS_VESTING, E_POD_NOT_VESTING);
+
+    let amount = pod.token_vault.value() - pod.total_allocated;
+    assert!(amount > 0, E_NOTHING_TO_CLAIM);
+    event::emit(EventUnallocatedTokensClaimed { pod_id: object::id(pod), amount });
+
+    coin::from_balance(balance::split(&mut pod.token_vault, amount), ctx)
+}
+
 // --- Public (non-entry) View Functions ---
 
 public fun calculate_founder_claimable<C, T>(pod: &Pod<C, T>, clock: &Clock): u64 {
     let time_elapsed = pod.elapsed_vesting_time(clock);
     if (time_elapsed == 0) return 0;
 
-    let immediate_unlock = (pod.total_raised * pod.immediate_unlock_pm) / PRECISION;
+    let immediate_unlock = ratio_ext_pm(pod.total_raised, pod.immediate_unlock_pm);
     let vested_funds = if (time_elapsed >= pod.vesting_duration) {
         pod.total_raised - immediate_unlock
     } else {
-        (time_elapsed * (pod.total_raised - immediate_unlock)) / pod.vesting_duration
+        ratio_ext(time_elapsed, (pod.total_raised - immediate_unlock), pod.vesting_duration)
     };
     immediate_unlock + vested_funds
 }
 
+// Note: we can't have it as a pod method because it cause problem with borrow constrains.
 public fun calculate_vested_tokens(
     time_elapsed: u64,
     vesting_duration: u64,
@@ -463,19 +498,33 @@ public fun calculate_vested_tokens(
 ): u64 {
     if (time_elapsed == 0) return 0;
 
-    let immediate_unlock = (allocation * immediate_unlock_pm) / PRECISION;
+    let immediate_unlock = ratio_ext_pm(allocation, immediate_unlock_pm);
     let vested_tokens = if (time_elapsed >= vesting_duration) {
         allocation - immediate_unlock
     } else {
-        (time_elapsed * (allocation - immediate_unlock)) / vesting_duration
+        ratio_ext(time_elapsed, (allocation - immediate_unlock), vesting_duration)
     };
     immediate_unlock + vested_tokens
 }
 
-// --- Private Helper Functions ---
+//
+// --- Package Helper Functions ---
+//
 
-public fun elapsed_vesting_time<C, T>(pod: &Pod<C, T>, clock: &Clock): u64 {
+/// Returns time elapsed since vesting.
+/// Aborts if pod is not in vesting phase.
+public(package) fun elapsed_vesting_time<C, T>(pod: &Pod<C, T>, clock: &Clock): u64 {
     assert!(pod_status(pod, clock) == STATUS_VESTING, E_POD_NOT_VESTING);
     let now = clock.timestamp_ms();
     return now - pod.subscription_end
+}
+
+/// calculates num * numerator / denominator using extended precision (u128)
+public(package) fun ratio_ext(x: u64, numerator: u64, denominator: u64): u64 {
+    ((x as u128) * (numerator as u128) / (denominator as u128)) as u64
+}
+
+/// calculates num * numerator / PERMILLE using extended precision (u128)
+public(package) fun ratio_ext_pm(x: u64, numerator: u64): u64 {
+    ((x as u128) * (numerator as u128) / PERMILLE_U128) as u64
 }
