@@ -1,5 +1,5 @@
 
-setup-hooks:
+setup:
 	@cd .git/hooks; ln -s -f ../../contrib/git-hooks/* ./
 	@bun install -g prettier @mysten/prettier-plugin-move
 
@@ -22,7 +22,7 @@ format-move:
 ##                              Build & Test                                 ##
 ###############################################################################
 
-build: ../.git/hooks/pre-commit
+build:
 	@sui move build
 
 test:
