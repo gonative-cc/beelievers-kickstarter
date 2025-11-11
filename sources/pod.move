@@ -513,7 +513,6 @@ public fun founder_claim_funds<C, T>(
     assert!(cap.pod_id == object::id(pod), E_NOT_ADMIN);
     assert!(pod_status(pod, clock) == STATUS_VESTING, E_POD_NOT_VESTING);
 
-    // TODO: use calculate_vested_tokens
     let total_claimable = calculate_founder_claimable(pod, clock);
     let to_claim = total_claimable - pod.founder_claimed_funds;
     assert!(to_claim > 0, E_NOTHING_TO_CLAIM);
@@ -559,16 +558,12 @@ public fun withdraw_unallocated_tokens<C, T>(
 // --- Public View Functions ---
 
 public fun calculate_founder_claimable<C, T>(pod: &Pod<C, T>, clock: &Clock): u64 {
-    let time_elapsed = pod.elapsed_vesting_time(clock);
-    let immediate_unlock = ratio_ext_pm(pod.total_raised, pod.immediate_unlock_pm);
-    if (time_elapsed == 0) return immediate_unlock;
-
-    let vested_funds = if (time_elapsed >= pod.vesting_duration) {
-        pod.total_raised - immediate_unlock
-    } else {
-        ratio_ext(time_elapsed, (pod.total_raised - immediate_unlock), pod.vesting_duration)
-    };
-    immediate_unlock + vested_funds
+    calculate_vested_tokens(
+        pod.elapsed_vesting_time(clock),
+        pod.vesting_duration,
+        pod.immediate_unlock_pm,
+        pod.total_raised,
+    )
 }
 
 // Note: we can't have it as a pod method because it cause problem with borrow constrains.
