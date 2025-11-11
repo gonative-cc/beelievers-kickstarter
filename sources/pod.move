@@ -59,7 +59,7 @@ public struct PodAdminCap has key, store {
 
 /// Represents an individual's investment in a pod.
 public struct InvestorRecord has copy, drop, store {
-    invested: u64,
+    investmnet: u64,
     allocation: u64,
     claimed_tokens: u64,
     cancelled: bool,
@@ -107,7 +107,7 @@ public struct EventSubscriptionCancelled has copy, drop {
     pod_id: ID,
     investor: address,
     refunded: u64,
-    invested: u64,
+    investmnet: u64,
     allocation: u64,
 }
 public struct EventSettingsUpdated has copy, drop {}
@@ -340,13 +340,13 @@ public fun invest<C, T>(
     pod.funds_vault.join(investment.into_balance());
 
     let total_investment = if (pod.investments.contains(investor)) {
-        let allocation = &mut pod.investments[investor];
-        allocation.invested = allocation.invested + actual_investment;
-        allocation.allocation = allocation.allocation + additional_tokens;
-        allocation.invested
+        let ir = &mut pod.investments[investor];
+        ir.investmnet = ir.investmnet + actual_investment;
+        ir.allocation = ir.allocation + additional_tokens;
+        ir.investmnet
     } else {
         let allocation = InvestorRecord {
-            invested: actual_investment,
+            investmnet: actual_investment,
             allocation: additional_tokens,
             claimed_tokens: 0,
             cancelled: false,
@@ -379,27 +379,27 @@ public fun cancel_subscription<C, T>(
     let investor = ctx.sender();
     assert!(pod.investments.contains(investor), E_INVESTMENT_NOT_FOUND);
     let pod_id = object::id(pod);
-    let i = &mut pod.investments[investor];
-    assert!(!i.cancelled, E_INVESTMENT_CANCELLED);
+    let ir = &mut pod.investments[investor];
+    assert!(!ir.cancelled, E_INVESTMENT_CANCELLED);
 
-    let orig_investment = i.invested;
-    let orig_allocation = i.allocation;
+    let orig_investment = ir.investmnet;
+    let orig_allocation = ir.allocation;
     // NOTE: no need to use higher precision because the cancel_subscription_keep is small
-    i.invested = (orig_investment * settings.cancel_subscription_keep) / PERMILLE;
-    i.allocation = (orig_allocation * settings.cancel_subscription_keep) / PERMILLE;
-    i.cancelled = true;
+    ir.investmnet = (orig_investment * settings.cancel_subscription_keep) / PERMILLE;
+    ir.allocation = (orig_allocation * settings.cancel_subscription_keep) / PERMILLE;
+    ir.cancelled = true;
 
-    let refunded = orig_investment - i.invested;
+    let refunded = orig_investment - ir.investmnet;
     pod.total_raised = pod.total_raised - refunded;
-    let allocation_reduction = orig_allocation - i.allocation;
+    let allocation_reduction = orig_allocation - ir.allocation;
     pod.total_allocated = pod.total_allocated - allocation_reduction;
 
     emit(EventSubscriptionCancelled {
         pod_id,
         investor,
         refunded,
-        invested: i.invested,
-        allocation: i.allocation,
+        investmnet: ir.investmnet,
+        allocation: ir.allocation,
     });
     coin::take(&mut pod.funds_vault, refunded, ctx)
 }
@@ -413,18 +413,18 @@ public fun investor_claim_tokens<C, T>(
     let investor = ctx.sender();
     let time_elapsed = pod.elapsed_vesting_time(clock);
     let pod_id = object::id(pod);
-    let allocation = &mut pod.investments[investor];
+    let ir = &mut pod.investments[investor];
     let vested_tokens = calculate_vested_tokens(
         time_elapsed,
         pod.vesting_duration,
         pod.immediate_unlock_pm,
-        allocation.allocation,
+        ir.allocation,
     );
-    let to_claim = vested_tokens - allocation.claimed_tokens;
+    let to_claim = vested_tokens - ir.claimed_tokens;
     assert!(to_claim > 0, E_NOTHING_TO_CLAIM);
 
-    allocation.claimed_tokens = allocation.claimed_tokens + to_claim;
-    emit(EventInvestorClaim { pod_id, investor, total_amount: allocation.claimed_tokens });
+    ir.claimed_tokens = ir.claimed_tokens + to_claim;
+    emit(EventInvestorClaim { pod_id, investor, total_amount: ir.claimed_tokens });
 
     coin::take(&mut pod.token_vault, to_claim, ctx)
 }
@@ -436,21 +436,21 @@ public fun exit_investment<C, T>(
 ): (Coin<C>, Coin<T>) {
     assert!(pod_status(pod, clock) == STATUS_VESTING, E_POD_NOT_VESTING);
     let investor = ctx.sender();
-    let allocation = pod.investments.remove(investor);
-    assert!(allocation.claimed_tokens < allocation.allocation, E_ALREADY_EXITED);
+    let ir = pod.investments.remove(investor);
+    assert!(ir.claimed_tokens < ir.allocation, E_ALREADY_EXITED);
 
     let time_elapsed = pod.elapsed_vesting_time(clock);
     let vested_tokens = calculate_vested_tokens(
         time_elapsed,
         pod.vesting_duration,
         pod.immediate_unlock_pm,
-        allocation.allocation,
+        ir.allocation,
     );
     let funds_unlocked = calculate_vested_tokens(
         time_elapsed,
         pod.vesting_duration,
         pod.immediate_unlock_pm,
-        allocation.invested,
+        ir.investmnet,
     );
     let fee_pm = if (clock.timestamp_ms() < pod.subscription_end + pod.small_fee_duration) {
         pod.pod_exit_small_fee_pm
@@ -458,21 +458,21 @@ public fun exit_investment<C, T>(
         pod.pod_exit_fee_pm
     };
 
-    let remaining_investment = allocation.invested - funds_unlocked;
+    let remaining_investment = ir.investmnet - funds_unlocked;
     let fee_amount = ratio_ext_pm(remaining_investment, fee_pm);
     assert!(remaining_investment > fee_amount, E_NOTHING_TO_EXIT);
 
     let refund_amount = remaining_investment - fee_amount;
     let refund_coin = coin::take(&mut pod.funds_vault, refund_amount, ctx);
 
-    let to_claim = vested_tokens - allocation.claimed_tokens;
+    let to_claim = vested_tokens - ir.claimed_tokens;
     let vested_coin = if (to_claim > 0) {
         coin::take(&mut pod.token_vault, to_claim, ctx)
     } else {
         coin::zero(ctx)
     };
 
-    let unvested_tokens = allocation.allocation - vested_tokens;
+    let unvested_tokens = ir.allocation - vested_tokens;
     if (unvested_tokens > 0) {
         pod.total_allocated = pod.total_allocated - unvested_tokens;
     };
@@ -494,10 +494,10 @@ public fun failed_pod_refund<C, T>(
 ): Coin<C> {
     assert!(pod_status(pod, clock) == STATUS_FAILED, E_POD_NOT_FAILED);
     let investor = ctx.sender();
-    let allocation = pod.investments.remove(investor);
+    let ir = pod.investments.remove(investor);
 
     emit(EventFailedPodRefund { pod_id: object::id(pod), investor });
-    coin::take(&mut pod.funds_vault, allocation.invested, ctx)
+    coin::take(&mut pod.funds_vault, ir.investmnet, ctx)
 }
 
 //
